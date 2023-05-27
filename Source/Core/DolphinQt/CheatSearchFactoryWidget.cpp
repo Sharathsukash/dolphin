@@ -23,6 +23,7 @@
 #include "Core/Core.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/MMU.h"
+#include "Core/System.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 
@@ -55,7 +56,7 @@ void CheatSearchFactoryWidget::CreateWidgets()
   label_standard_address_space->setWordWrap(true);
 
   auto* custom_address_space_layout = new QVBoxLayout();
-  custom_address_space_layout->setMargin(6);
+  custom_address_space_layout->setContentsMargins(6, 6, 6, 6);
   auto* custom_address_space_button_group = new QButtonGroup(this);
   m_custom_virtual_address_space = new QRadioButton(tr("Use virtual addresses when possible"));
   m_custom_virtual_address_space->setChecked(true);
@@ -164,9 +165,11 @@ void CheatSearchFactoryWidget::OnNewSearchClicked()
       return;
     }
 
-    memory_ranges.emplace_back(0x80000000, Memory::GetRamSizeReal());
+    auto& system = Core::System::GetInstance();
+    auto& memory = system.GetMemory();
+    memory_ranges.emplace_back(0x80000000, memory.GetRamSizeReal());
     if (SConfig::GetInstance().bWii)
-      memory_ranges.emplace_back(0x90000000, Memory::GetExRamSizeReal());
+      memory_ranges.emplace_back(0x90000000, memory.GetExRamSizeReal());
     address_space = PowerPC::RequestedAddressSpace::Virtual;
   }
   else

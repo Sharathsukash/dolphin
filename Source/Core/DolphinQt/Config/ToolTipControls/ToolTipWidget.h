@@ -7,7 +7,7 @@
 
 #include <QString>
 
-#include "DolphinQt/Config/Graphics/BalloonTip.h"
+#include "DolphinQt/Config/ToolTipControls/BalloonTip.h"
 
 constexpr int TOOLTIP_DELAY = 300;
 
@@ -22,22 +22,15 @@ public:
   void SetDescription(QString description) { m_description = std::move(description); }
 
 private:
-  void enterEvent(QEvent* event) override
+  void enterEvent(QEnterEvent* event) override
   {
     if (m_timer_id)
       return;
     m_timer_id = this->startTimer(TOOLTIP_DELAY);
   }
 
-  void leaveEvent(QEvent* event) override
-  {
-    if (m_timer_id)
-    {
-      this->killTimer(*m_timer_id);
-      m_timer_id.reset();
-    }
-    BalloonTip::HideBalloon();
-  }
+  void leaveEvent(QEvent* event) override { KillAndHide(); }
+  void hideEvent(QHideEvent* event) override { KillAndHide(); }
 
   void timerEvent(QTimerEvent* event) override
   {
@@ -49,6 +42,16 @@ private:
   }
 
   virtual QPoint GetToolTipPosition() const = 0;
+
+  void KillAndHide()
+  {
+    if (m_timer_id)
+    {
+      this->killTimer(*m_timer_id);
+      m_timer_id.reset();
+    }
+    BalloonTip::HideBalloon();
+  }
 
   std::optional<int> m_timer_id;
   QString m_title;

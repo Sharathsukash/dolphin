@@ -31,7 +31,7 @@ int ConvertCommand::Main(const std::vector<std::string>& args)
 
   parser.add_option("-u", "--user")
       .action("store")
-      .help("User folder path, required for temporary processing files."
+      .help("User folder path, required for temporary processing files. "
             "Will be automatically created if this option is not set.");
 
   parser.add_option("-i", "--input")
@@ -212,7 +212,7 @@ int ConvertCommand::Main(const std::vector<std::string>& args)
     }
 
     if (format == DiscIO::BlobType::GCZ && volume &&
-        !DiscIO::IsGCZBlockSizeLegacyCompatible(block_size_o.value(), volume->GetSize()))
+        !DiscIO::IsGCZBlockSizeLegacyCompatible(block_size_o.value(), volume->GetDataSize()))
     {
       std::cerr << "Warning: For GCZs to be compatible with Dolphin < 5.0-11893, "
                    "the file size must be an integer multiple of the block size "

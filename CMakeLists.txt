@@ -1,22 +1,71 @@
 ########################################
 # General setup
 #
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.13)
+
+cmake_policy(SET CMP0079 NEW) # let target_link_libraries() link to a target defined in a different directory
+cmake_policy(SET CMP0080 OLD) # allow using BundleUtilities at configure time
+
+if (POLICY CMP0099)
+  cmake_policy(SET CMP0099 NEW) # Propagate INTERFACE_LINK_OPTIONS from private dependencies, used by MacOS framework builds of SDL
+endif()
+
+# Weird chicken-and-egg problem: We can't check the compiler before the project() call, but we have to set the policies before it.
+# So we do this in two steps: Set the policies if they exist, then error out afterwards if we end up being MSVC and they don't exist.
+if (POLICY CMP0117)
+  cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags are selected by an abstraction.
+  cmake_policy(SET CMP0092 NEW) # MSVC warning flags are not in CMAKE_{C,CXX}_FLAGS by default.
+  cmake_policy(SET CMP0117 NEW) # MSVC RTTI flag will not be added by default.
+endif()
+
+if (POLICY CMP0141)
+  cmake_policy(SET CMP0141 NEW) # MSVC debug information format flags are selected by an abstraction.
+endif()
 
 # Minimum OS X version.
 # This is inserted into the Info.plist as well.
-
-# MacOS prior to 10.14 did not support aligned alloc which is used to implement
-# std::unique_ptr in the arm64 C++ standard library. x86_64 builds can override
-# this to 10.13.0 using -DCMAKE_OSX_DEPLOYMENT_TARGET="10.13.0" without issue.
-# This is done in the universal binary building script to build a binary that 
-# runs on 10.13 on x86_64 computers, while still containing an arm64 slice.
-
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14.0" CACHE STRING "")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15.0" CACHE STRING "")
 
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "CMake/FlagsOverride.cmake")
 
 project(dolphin-emu)
+
+if (MSVC)
+  if (POLICY CMP0117)
+    # cmake is a weird language. You can't do if(not POLICY)
+  else()
+    message(FATAL_ERROR "Please update to CMake 3.20 or higher.")
+  endif()
+
+  set(CMAKE_C_STANDARD 99)
+  set(CMAKE_CXX_STANDARD 23)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+endif()
+
+set(COMPILER ${CMAKE_CXX_COMPILER_ID})
+if (COMPILER STREQUAL "GNU")
+  set(COMPILER "GCC") # perfer printing GCC instead of GNU
+endif()
+
+# Enforce minimium compiler versions that support the c++20 features we use
+set (GCC_min_version 10)
+set (Clang_min_version 12)
+set (AppleClang_min_version 13.0.0)
+set (min_xcode_version "13.0") # corrosponding xcode version for AppleClang_min_version
+set (MSVC_min_version 14.32)
+set (min_vs_version "2022 17.2.3") # corrosponding Visual Studio version for MSVC_min_version
+
+message(STATUS "Using ${COMPILER} ${CMAKE_CXX_COMPILER_VERSION}")
+
+if ("-" STREQUAL "${${COMPILER}_min_version}-")
+  message(WARNING "Unknown compiler ${COMPILER}, assuming it is new enough")
+else()
+  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS  ${${COMPILER}_min_version})
+    message(FATAL_ERROR "Requires GCC ${GCC_min_version}, Clang ${Clang_min_version},"
+    " AppleClang ${AppleClang_min_version} (Xcode ${min_xcode_version}),"
+    " or MSVC ${MSVC_min_version} (Visual Studio ${min_vs_version}) or higher")
+  endif()
+endif()
 
 # Name of the Dolphin distributor. If you redistribute Dolphin builds (forks,
 # unofficial builds) please consider identifying your distribution with a
@@ -51,6 +100,8 @@ option(ENABLE_VULKAN "Enables vulkan video backend" ON)
 option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence, show the current game on Discord" ON)
 option(USE_MGBA "Enables GBA controllers emulation using libmgba" ON)
 option(ENABLE_AUTOUPDATE "Enables support for automatic updates" ON)
+option(STEAM "Creates a build for Steam" OFF)
+option(USE_RETRO_ACHIEVEMENTS "Enables integration with retroachievements.org" ON)
 
 # Maintainers: if you consider blanket disabling this for your users, please
 # consider the following points:
@@ -69,8 +120,8 @@ option(OPROFILING "Enable profiling" OFF)
 # TODO: Add DSPSpy
 option(DSPTOOL "Build dsptool" OFF)
 
-# Enable SDL for default on operating systems that aren't Android, Linux or Windows.
-if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
+# Enable SDL for default on operating systems that aren't Android or Linux.
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
   option(ENABLE_SDL "Enables SDL as a generic controller backend" ON)
 else()
   option(ENABLE_SDL "Enables SDL as a generic controller backend" OFF)
@@ -78,9 +129,10 @@ endif()
 
 if(APPLE)
   option(MACOS_USE_DEFAULT_SEARCH_PATH "Don't prioritize system library paths" OFF)
-  option(SKIP_POSTPROCESS_BUNDLE "Skip postprocessing bundle for redistributability" OFF) 
+  option(SKIP_POSTPROCESS_BUNDLE "Skip postprocessing bundle for redistributability" OFF)
   # Enable adhoc code signing by default (otherwise makefile builds on ARM will not work)
   option(MACOS_CODE_SIGNING "Enable codesigning" ON)
+  option(USE_BUNDLED_MOLTENVK "Build MoltenVK from Externals with Dolphin-specific patches" ON)
   set(MACOS_CODE_SIGNING_IDENTITY "-" CACHE STRING "The identity used for codesigning.")
   set(MACOS_CODE_SIGNING_IDENTITY_UPDATER "-" CACHE STRING "The identity used for codesigning, for the updater.")
 endif()
@@ -108,14 +160,16 @@ include(CheckAndAddFlag)
 include(CheckCCompilerFlag)
 include(CheckVendoringApproved)
 include(DolphinCompileDefinitions)
+include(DolphinDisableWarningsMSVC)
+include(DolphinLibraryTools)
+include(GNUInstallDirs)
+include(RemoveCompileFlag)
 
 # Enable folders for IDE
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # Set up paths
-set(bindir  ${CMAKE_INSTALL_PREFIX}/bin               CACHE PATH "bindir")
-set(datadir ${CMAKE_INSTALL_PREFIX}/share/dolphin-emu CACHE PATH "datadir")
-set(mandir  ${CMAKE_INSTALL_PREFIX}/share/man         CACHE PATH "mandir")
+set(datadir ${CMAKE_INSTALL_FULL_DATADIR}/dolphin-emu CACHE PATH "datadir")
 add_definitions(-DDATA_DIR="${datadir}/")
 
 if(CMAKE_SYSROOT)
@@ -231,12 +285,6 @@ else()
       " Enable generic build if you really want a JIT-less binary.")
 endif()
 
-
-# Enforce minimum GCC version
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.0)
-  message(FATAL_ERROR "Dolphin requires at least GCC 7.0 (found ${CMAKE_CXX_COMPILER_VERSION})")
-endif()
-
 if(CMAKE_GENERATOR MATCHES "Ninja")
   check_and_add_flag(DIAGNOSTICS_COLOR -fdiagnostics-color)
 elseif(CMAKE_GENERATOR MATCHES "Visual Studio")
@@ -244,33 +292,70 @@ elseif(CMAKE_GENERATOR MATCHES "Visual Studio")
   add_compile_options("/MP")
 endif()
 
-if(CMAKE_C_COMPILER_ID MATCHES "MSVC")
+if(MSVC)
   check_and_add_flag(EXCEPTIONS /EHsc)
   dolphin_compile_definitions(_DEBUG DEBUG_ONLY)
+
+  # Disable RTTI
+  add_compile_options(/GR-)
+
+  # Set warning level 4 (the highest)
+  add_compile_options(/W4)
+
+  # Treat all warnings as errors
+  add_compile_options(/WX)
+
+  # Disable some warnings
+  add_compile_options(
+    /wd4201 # nonstandard extension used : nameless struct/union
+    /wd4127 # conditional expression is constant
+    /wd4100 # 'identifier' : unreferenced formal parameter
+    /wd4200 # InputCommon fix temp.
+    /wd4244 # 'conversion' conversion from 'type1' to 'type2', possible loss of data
+    /wd4121 # 'symbol' : alignment of a member was sensitive to packing
+    /wd4324 # Padding was added at the end of a structure because you specified a __declspec(align) value.
+    /wd4714 # function 'function' marked as __forceinline not inlined
+    /wd4351 # new behavior: elements of array 'array' will be default initialized
+    # TODO: Enable this warning once possible
+    /wd4245 # conversion from 'type1' to 'type2', signed/unsigned mismatch
+    # Currently jits use some annoying code patterns which makes this common
+  )
+
+  # Additional warnings
+  add_compile_options(
+    /w44263 # Non-virtual member function hides base class virtual function
+    /w44265 # Class has virtual functions, but destructor is not virtual
+    /w44946 # Reinterpret cast between related types
+  )
+
+  # All files are encoded as UTF-8
+  add_compile_options(/utf-8)
+
+  # Ignore warnings in external headers
+  add_compile_options(/external:anglebrackets)
+  add_compile_options(/external:W0)
+  add_compile_options(/external:templates-)
+
+  # Request deterministic builds
+  add_compile_options(/experimental:deterministic)
+  add_link_options(/experimental:deterministic)
 
   # Enable function-level linking
   add_compile_options(/Gy)
   # Generate intrinsic functions
   add_compile_options(/Oi)
-  # Disable buffer security check
-  add_compile_options(/GS-)
-  # Enforce C++ standard conforming conversion rules to catch possible bugs
-  add_compile_options(/permissive-)
+  # Enable buffer security check on Debug, disable otherwise
+  add_compile_options($<IF:$<CONFIG:Debug>,/GS,/GS->)
   # Remove unreferenced inline functions/data to reduce link time and catch bugs
+  # Note: In msbuild build, this gets set by msbuild by default
   add_compile_options(/Zc:inline)
-  # Assume `new` (w/o std::nothrow) throws to reduce binary size
-  add_compile_options(/Zc:throwingNew)
+  # Fix various other non-conformant behaviors
+  add_compile_options(/Zc:__cplusplus,enumTypes,externConstexpr,preprocessor,templateScope,throwingNew)
   # Enforce strict volatile semantics as per ISO C++
   add_compile_options(/volatile:iso)
-  # Fix non-conformant lambda behavior (constexpr variables shouldn't need capturing)
-  add_compile_options(/experimental:newLambdaProcessor)
-  # Fix various other non-conformant behaviors
-  add_compile_options(/Zc:__cplusplus,externConstexpr,lambda,preprocessor)
 
-  # Temporarily disable warnings to enable /Zc:preprocessor compatibility with WinSDK headers.
-  add_compile_options(
-    /wd5105 # macro expansion producing 'defined' has undefined behavior
-  )
+  # Use 'precise' floating point model
+  add_compile_options(/fp:precise)
 
   string(APPEND CMAKE_EXE_LINKER_FLAGS " /NXCOMPAT")
   # Generate debug data
@@ -358,8 +443,10 @@ if(ENABLE_LTO)
   endif()
 endif()
 
-if(UNIX AND LINUX_LOCAL_DEV)
-  add_definitions(-DLINUX_LOCAL_DEV)
+if(UNIX)
+  if(LINUX_LOCAL_DEV OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND STEAM))
+    add_definitions(-DLINUX_LOCAL_DEV)
+  endif()
 endif()
 
 # BSDs put packages in /usr/local instead of /usr, so we need to
@@ -371,6 +458,12 @@ if(CMAKE_SYSTEM_NAME MATCHES "FreeBSD|NetBSD")
   set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH};/usr/local")
   set(CMAKE_REQUIRED_INCLUDES "/usr/local/include")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L/usr/local/lib")
+
+  if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14.0)
+    # Workaround: the llvm libc++ and versions of clang eariler than 14 have a bug with consteval
+    # so we define FMT_CONSTEVAL to blank to just disable consteval in fmt
+    add_definitions(-DFMT_CONSTEVAL=)
+  endif()
 endif()
 
 # Dolphin requires threads.
@@ -433,12 +526,15 @@ if(ENABLE_HEADLESS)
   set(USE_DISCORD_PRESENCE 0)
 endif()
 
-# Set file offset size to 64 bits.
+# Set file offset size to 64 bits. On modern Unixes, this is typically already the case. Exceptions:
 #
-# On modern Unixes, this is typically already the case. The lone exception is
-# glibc, which may default to 32 bits. glibc allows this to be configured
-# by setting _FILE_OFFSET_BITS.
-if(NOT CMAKE_SYSTEM_NAME MATCHES "Windows")
+# glibc may default to 32 bits. This can be configured by setting _FILE_OFFSET_BITS=64.
+#
+# bionic (Android) defaults to 32 bits for 32-bit ABIs. Here too we can use _FILE_OFFSET_BITS=64,
+# but only on API 25 and up. Since we're currently supporting older API levels and 32-bit Android
+# isn't a build configuration we officially support, let's leave this as it is for now.
+# More details: https://android.googlesource.com/platform/bionic/+/master/docs/32-bit-abi.md
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME MATCHES "Windows")
   add_definitions(-D_FILE_OFFSET_BITS=64)
   add_definitions(-D_LARGEFILE_SOURCE)
 endif()
@@ -494,7 +590,7 @@ if(ENCODE_FRAMEDUMPS)
   endif()
   find_package(FFmpeg COMPONENTS avcodec avformat avutil swresample swscale)
   if(FFmpeg_FOUND)
-    if(APPLE) 
+    if(APPLE)
       find_library(COREMEDIA_LIBRARY CoreMedia)
       find_library(VIDEOTOOLBOX_LIBRARY VideoToolbox)
       find_library(COREVIDEO_LIBRARY CoreVideo)
@@ -502,6 +598,12 @@ if(ENCODE_FRAMEDUMPS)
     endif()
     message(STATUS "libav/ffmpeg found, enabling AVI frame dumps")
     add_definitions(-DHAVE_FFMPEG)
+    if(WIN32)
+      # Our prebuilt binaries depend on Bcrypt
+      set_property(TARGET FFmpeg::avutil APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES "Bcrypt.lib"
+      )
+    endif()
   else()
     message(STATUS "libav/ffmpeg not found, disabling AVI frame dumps")
   endif()
@@ -534,6 +636,35 @@ if(UNIX)
   add_definitions(-DUSE_PIPES=1)
   message(STATUS "Watching game memory for changes")
   add_definitions(-DUSE_MEMORYWATCHER=1)
+endif()
+
+if(ENABLE_SDL)
+  find_package(SDL2)
+
+  if(SDL2_FOUND)
+    message(STATUS "Using system SDL2")
+  else()
+    message(STATUS "Using static SDL2 from Externals")
+    option(SDL2_DISABLE_SDL2MAIN "" ON)
+    option(SDL2_DISABLE_INSTALL "" ON)
+    option(SDL2_DISABLE_UNINSTALL "" ON)
+    set(SDL_SHARED OFF)
+    set(SDL_SHARED_ENABLED_BY_DEFAULT OFF)
+    set(SDL_STATIC ON)
+    set(SDL_STATIC_ENABLED_BY_DEFAULT ON)
+    set(SDL_TEST OFF)
+    set(SDL_TEST_ENABLED_BY_DEFAULT OFF)
+    set(OPT_DEF_LIBC ON)
+    add_subdirectory(Externals/SDL/SDL)
+    if (TARGET SDL2)
+      dolphin_disable_warnings_msvc(SDL2)
+    endif()
+    if (TARGET SDL2-static)
+      dolphin_disable_warnings_msvc(SDL2-static)
+    endif()
+    set(SDL2_FOUND TRUE)
+  endif()
+  add_definitions(-DHAVE_SDL2=1)
 endif()
 
 if(ENABLE_ANALYTICS)
@@ -574,7 +705,7 @@ if (_M_X86)
 endif()
 add_subdirectory(Externals/cpp-optparse)
 
-find_package(fmt 8.0)
+find_package(fmt 8)
 if(fmt_FOUND)
   message(STATUS "Using shared fmt ${fmt_VERSION}")
 else()
@@ -583,12 +714,18 @@ else()
   add_subdirectory(Externals/fmt EXCLUDE_FROM_ALL)
 endif()
 add_subdirectory(Externals/imgui)
+add_subdirectory(Externals/implot)
 add_subdirectory(Externals/glslang)
+# SPIRV-Cross is used on Windows for GLSL to HLSL conversion for the Direct3D 11 and Direct3D 12
+# video backends, and on Apple devices for the Metal video backend.
+if(WIN32 OR APPLE)
+  add_subdirectory(Externals/spirv_cross)
+endif()
 
 if(ENABLE_VULKAN)
   add_definitions(-DHAS_VULKAN)
 
-  if(APPLE)
+  if(APPLE AND USE_BUNDLED_MOLTENVK)
     add_subdirectory(Externals/MoltenVK)
   endif()
 endif()
@@ -649,43 +786,29 @@ endif()
 
 # macOS ships with liblzma.dylib but no headers, so check for the headers too
 find_package(LibLZMA)
-check_include_file(lzma.h HAVE_LZMA_H)
-if(LIBLZMA_FOUND AND HAVE_LZMA_H)
+if(LIBLZMA_FOUND)
+  # Imported target added in CMake 3.14
+  dolphin_make_imported_target_if_missing(LibLZMA::LibLZMA LIBLZMA)
   message(STATUS "Using shared lzma")
 else()
   check_vendoring_approved(lzma)
-  if(LIBLZMA_FOUND AND NOT HAVE_LZMA_H)
-    message(STATUS "Shared lzma found but lacks headers, falling back to the static library")
-  else()
-    message(STATUS "Shared lzma not found, falling back to the static library")
-  endif()
+  message(STATUS "Shared lzma not found, falling back to the static library")
   add_subdirectory(Externals/liblzma)
 endif()
 
-pkg_check_modules(ZSTD QUIET libzstd>=1.4.0)
-check_include_file(zstd.h HAVE_ZSTD_H)
-if(ZSTD_FOUND AND HAVE_ZSTD_H)
+pkg_check_modules(ZSTD QUIET libzstd>=1.4.0 IMPORTED_TARGET)
+if(ZSTD_FOUND)
   message(STATUS "Using shared zstd version: " ${ZSTD_VERSION})
+  dolphin_alias_library(zstd::zstd PkgConfig::ZSTD)
 else()
   check_vendoring_approved(zstd)
-  if(ZSTD_FOUND AND NOT HAVE_ZSTD_H)
-    message(STATUS "Shared zstd found but lacks headers, falling back to the static library")
-  else()
-    message(STATUS "Shared zstd not found, falling back to the static library")
-  endif()
+  message(STATUS "Shared zstd not found, falling back to the static library")
   add_subdirectory(Externals/zstd)
 endif()
 
-find_package(ZLIB)
-if(ZLIB_FOUND)
-  message(STATUS "Using shared zlib")
-else()
-  check_vendoring_approved(zlib)
-  message(STATUS "Shared zlib not found, falling back to the static library")
-  add_subdirectory(Externals/zlib)
-endif()
+add_subdirectory(Externals/zlib-ng)
 
-pkg_check_modules(MINIZIP minizip>=2.0.0)
+pkg_check_modules(MINIZIP minizip>=3.0.0)
 if(MINIZIP_FOUND)
   message(STATUS "Using shared minizip")
   include_directories(${MINIZIP_INCLUDE_DIRS})
@@ -708,16 +831,14 @@ else()
   set(LZO lzo2)
 endif()
 
-if(NOT APPLE)
-  check_lib(PNG libpng png png.h QUIET)
-endif()
-if (PNG_FOUND)
-  message(STATUS "Using shared libpng")
+pkg_check_modules(pc_spng IMPORTED_TARGET spng)
+if (pc_spng_FOUND AND TARGET PkgConfig::pc_spng)
+  message(STATUS "Using the system libspng")
+  set(spng_target PkgConfig::pc_spng)
 else()
-  check_vendoring_approved(libpng)
-  message(STATUS "Using static libpng from Externals")
-  add_subdirectory(Externals/libpng)
-  set(PNG png)
+  message(STATUS "Using static libspng from Externals")
+  add_subdirectory(Externals/libspng)
+  set(spng_target spng)
 endif()
 
 # Using static FreeSurround from Externals
@@ -816,19 +937,16 @@ else()
   include_directories(BEFORE Externals/curl/include)
 endif()
 
-if (NOT ANDROID)
-  find_library(ICONV_LIBRARIES NAMES iconv libiconv libiconv-2 c)
-  find_path(ICONV_INCLUDE_DIR NAMES iconv.h)
+if(NOT ANDROID)
+  find_package(Iconv)
 endif()
 
-if (NOT ANDROID AND ICONV_LIBRARIES AND ICONV_INCLUDE_DIR)
-  mark_as_advanced(ICONV_INCLUDE_DIR ICONV_LIBRARIES)
+if(TARGET Iconv::Iconv)
+  message(STATUS "Using shared iconv")
 else()
   check_vendoring_approved(iconv)
   message(STATUS "Using static iconv from Externals")
-  include_directories(Externals/libiconv-1.14/include)
   add_subdirectory(Externals/libiconv-1.14)
-  set(ICONV_LIBRARIES iconv)
 endif()
 
 if(NOT ANDROID)
@@ -850,8 +968,11 @@ if(NOT ENABLE_QT)
   set(USE_MGBA 0)
 endif()
 if(USE_MGBA)
-  message(STATUS "Using static libmgba from Externals")
-  add_subdirectory(Externals/mGBA)
+  find_package(LIBMGBA)
+  if(NOT LIBMGBA_FOUND)
+    message(STATUS "Using static libmgba from Externals")
+    add_subdirectory(Externals/mGBA)
+  endif()
 endif()
 
 find_package(SYSTEMD)
@@ -862,6 +983,10 @@ else()
   message(STATUS "libsystemd not found, disabling traversal server watchdog support")
 endif()
 
+if(STEAM)
+  add_definitions(-DSTEAM)
+endif()
+
 if (WIN32)
   include_directories(Externals/WIL/include)
   include_directories(Externals/OpenAL/include)
@@ -869,7 +994,15 @@ endif()
 
 include_directories(Externals/picojson)
 
+add_subdirectory(Externals/expr)
+
 add_subdirectory(Externals/rangeset)
+
+add_subdirectory(Externals/FatFs)
+
+if (USE_RETRO_ACHIEVEMENTS)
+	add_subdirectory(Externals/rcheevos)
+endif()
 
 ########################################
 # Pre-build events: Define configuration variables and write SCM info header
@@ -879,6 +1012,10 @@ if(DOLPHIN_WC_BRANCH STREQUAL "master" OR DOLPHIN_WC_BRANCH STREQUAL "stable")
 else()
   set(DOLPHIN_WC_IS_STABLE "0")
 endif()
+
+# Remove in-tree revision information generated by Visual Studio
+# This is because the compiler will check in-tree first and use this, even if it is outdated
+file(REMOVE "${PROJECT_SOURCE_DIR}/Source/Core/Common/scmrev.h")
 
 configure_file(
   "${PROJECT_SOURCE_DIR}/Source/Core/Common/scmrev.h.in"
@@ -922,9 +1059,9 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD")
           DESTINATION ${CMAKE_INSTALL_PREFIX}/share/applications)
   # Install manpages
   install(FILES Data/dolphin-emu.6
-          DESTINATION ${mandir}/man6)
+          DESTINATION ${CMAKE_INSTALL_MANDIR}/man6)
   install(FILES Data/dolphin-emu-nogui.6
-          DESTINATION ${mandir}/man6)
+          DESTINATION ${CMAKE_INSTALL_MANDIR}/man6)
 endif()
 
 # packaging information
